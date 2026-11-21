@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Route viewer</title>
+<title>Live tracker</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; }
@@ -25,9 +25,13 @@
 <div id="app" hidden>
   <div class="bar">
     <input id="dev" value="dad-phone" size="10">
-    <input id="day" type="date">
-    <button id="loadBtn">Load route</button>
-    <label><input id="auto" type="checkbox"> auto-refresh</label>
+    <select id="win">
+      <option value="30">Last 30 min</option>
+      <option value="60" selected>Last 1 hour</option>
+      <option value="180">Last 3 hours</option>
+    </select>
+    <button id="loadBtn">Refresh</button>
+    <label><input id="auto" type="checkbox" checked> auto-refresh</label>
     <span id="stats"></span>
   </div>
   <div id="map"></div>
@@ -40,49 +44,32 @@ const SUPABASE_URL = "https://xlednrkvfacpmoqhfdwt.supabase.co";
 const SUPABASE_KEY = "sb_publishable_411MfS_0YIyyr4AFkYQ39A_C47htskN";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const $ = id => document.getElementById(id);
-let map, layer;
-
-function hav(a, b) {
-  const R = 6371000, r = Math.PI / 180;
-  const dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
-  const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(x));
-}
-const t = s => new Date(s).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+let map, layer, first = true;
 
 async function load() {
-  const start = new Date($('day').value + 'T00:00:00');
-  const end = new Date(start); end.setDate(end.getDate() + 1);
+  const since = new Date(Date.now() - Number($('win').value) * 60000).toISOString();
   const { data, error } = await sb.from('locations')
-    .select('lat,lng,recorded_at')
+    .select('lat,lng,speed,recorded_at')
     .eq('device_id', $('dev').value)
-    .gte('recorded_at', start.toISOString())
-    .lt('recorded_at', end.toISOString())
+    .gte('recorded_at', since)
     .order('recorded_at')
-    .limit(10000);
+    .limit(5000);
   if (error) { $('stats').textContent = error.message; return; }
   layer.clearLayers();
-  if (!data.length) { $('stats').textContent = 'No points for this day'; return; }
+  if (!data.length) { $('stats').textContent = 'No points in this time window'; return; }
 
-  let dist = 0, last = data[0];
-  const pts = [data[0]];
-  for (let i = 1; i < data.length; i++) {
-    const p = data[i];
-    const d = hav(last, p);
-    const dt = (new Date(p.recorded_at) - new Date(last.recorded_at)) / 1000;
-    if (d < 10) continue;               // GPS jitter while standing still
-    if (dt > 0 && d / dt > 50) continue; // impossible jump (>180 km/h)
-    dist += d; pts.push(p); last = p;
-  }
-  const ll = pts.map(p => [p.lat, p.lng]);
+  const ll = data.map(p => [p.lat, p.lng]);
+  const b = data[data.length - 1];
   L.polyline(ll, { weight: 4 }).addTo(layer);
-  L.circleMarker(ll[0], { radius: 7, color: 'green' }).addTo(layer)
-    .bindPopup('Start ' + t(pts[0].recorded_at));
-  L.circleMarker(ll[ll.length - 1], { radius: 7, color: 'red' }).addTo(layer)
-    .bindPopup('Latest ' + t(pts[pts.length - 1].recorded_at));
-  map.fitBounds(L.latLngBounds(ll).pad(0.1));
-  $('stats').textContent = (dist / 1000).toFixed(1) + ' km | ' + pts.length + ' points | '
-    + t(pts[0].recorded_at) + ' - ' + t(pts[pts.length - 1].recorded_at);
+  L.circleMarker(ll[ll.length - 1], { radius: 9, color: 'red', fillOpacity: 0.9 }).addTo(layer);
+
+  const ago = Math.round((Date.now() - new Date(b.recorded_at)) / 1000);
+  const kmh = b.speed != null ? Math.round(b.speed * 3.6) : 0;
+  $('stats').textContent = 'Last seen ' + (ago < 90 ? ago + ' s' : Math.round(ago / 60) + ' min')
+    + ' ago | ' + kmh + ' km/h';
+
+  if (first) { map.fitBounds(L.latLngBounds(ll).pad(0.2)); first = false; }
+  else if (!map.getBounds().contains(ll[ll.length - 1])) map.panTo(ll[ll.length - 1]);
 }
 
 function showApp() {
@@ -90,7 +77,6 @@ function showApp() {
   map = L.map('map').setView([13.08, 80.27], 11);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
   layer = L.layerGroup().addTo(map);
-  $('day').value = new Date().toLocaleDateString('sv');
   load();
 }
 
@@ -98,8 +84,9 @@ $('loginBtn').onclick = async () => {
   const { error } = await sb.auth.signInWithPassword({ email: $('email').value, password: $('pw').value });
   if (error) $('msg').textContent = error.message; else showApp();
 };
-$('loadBtn').onclick = load;
-setInterval(() => { if ($('auto').checked && !$('app').hidden) load(); }, 60000);
+$('loadBtn').onclick = () => { first = true; load(); };
+$('win').onchange = () => { first = true; load(); };
+setInterval(() => { if ($('auto').checked && !$('app').hidden) load(); }, 10000);
 sb.auth.getSession().then(({ data }) => { if (data.session) showApp(); });
 </script>
 </body>
